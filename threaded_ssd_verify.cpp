@@ -23,11 +23,7 @@ std::mutex mtx; // Mutex for synchronized output
 
 void readBlock(const std::string& ssd_device, uint64_t block_number, int block_size,
                std::ofstream& success_log, std::ofstream& failed_log) {
-    /*
-     *std::string dd_command = "dd if=" + ssd_device + " of=/dev/null skip=" + std::to_string(block_number)
-     *                          + " bs=" + std::to_string(block_size) + " count=1 status=none iflag=direct";
-     *int result = system(dd_command.c_str());
-     */
+    char * buffer = new char [block_size];
     std::ifstream ssd_input(ssd_device, std::ios::binary);
     if (!ssd_input) {
         failed_log <<"Error opening SSD device" << std::endl;
@@ -35,61 +31,56 @@ void readBlock(const std::string& ssd_device, uint64_t block_number, int block_s
     }
     // Seek to the desired block offset
     ssd_input.seekg(block_number * block_size);
-    char buffer[block_size];
     ssd_input.read(buffer, block_size);
 
-    std::lock_guard<std::mutex> lock(mtx);
-    if (ssd_input.gcount() != block_size) {
+    if (!ssd_input || (ssd_input.gcount() != block_size)) {
+        std::lock_guard<std::mutex> lock(mtx);
         std::cerr << "Block " << block_number << ": Read failed" << std::endl;
         failed_log << "Block " << block_number << ": Read failed" << std::endl;
-    /*
-     *} else {
-     *    success_log << "Block " << block_number << ": Read successful" << std::endl;
-     */
+    } else {
+        success_log << "Block " << block_number << ": Read successful" << std::endl;
     }
+    delete[] buffer;
+    ssd_input.close();
 }
 
-long long get_block_device_size(const char* device_path) {
-    struct stat statbuf;
-    long long total_bytes;
+long long get_block_device_size(const char* device_path, long long* total_bytes,
+        unsigned long* block_size) {
 
-    // Try stat first (simpler approach)
-    if (stat(device_path, &statbuf) != -1 && statbuf.st_blocks != 0) {
-	if (S_ISBLK(statbuf.st_mode)) {
-	    total_bytes = statbuf.st_blksize * statbuf.st_blocks;
-	    std::cout << "statbuf Total number of bytes : " << statbuf.st_blksize << " * " <<  statbuf.st_blocks << std::endl;
-	    return total_bytes;
-	} else {
-	    std::cerr << device_path << " is not a block device." << std::endl;
-	    return -1;
-	}
-    }
-
-    // Fallback to ioctl if stat fails
     int fd = open(device_path, O_RDONLY);
     if (fd == -1) {
-	perror("open");
-	return -1;
+        std::cerr << "Device " << device_path << "open failed" << std::endl;
+	return 1;
     }
-
-    if (ioctl(fd, BLKGETSIZE64, &total_bytes) == -1) {
-	perror("ioctl");
+    if (ioctl(fd, BLKGETSIZE64, total_bytes) == -1) {
+        std::cerr << "Device " << device_path << "BLKGETSIZE64 ioctl failed" << std::endl;
 	close(fd);
-	return -1;
+	return 1;
+    }
+    if (ioctl(fd, BLKSSZGET, block_size) < 0) {
+        std::cerr << "Device " << device_path << "BLKSSZGET ioctl failed" << std::endl;
+        return 1;
     }
 
     close(fd);
-    std::cout << "IOCTL: Total number of bytes : " << total_bytes << std::endl;
-    return total_bytes;
+    std::cout << "Block device size in bytes: " << *total_bytes << std::endl;
+    std::cout << "Block size in bytes: " << *block_size << std::endl;
+    return 0;
 }
 
 int main() {
     std::string ssd_device = "/dev/sda";  // Specify the SSD device here
-    int block_size = 512;                 // Specify the block size of your SSD in bytes
+    unsigned long block_size = 0;                 // Specify the block size of your SSD in bytes
 
     // Get the total size of the device in bytes
-    long long total_bytes = get_block_device_size(ssd_device.c_str());
+    long long total_bytes = 0;
+    int res = get_block_device_size(ssd_device.c_str(), &total_bytes, &block_size);
+    if(res || block_size == 0 || total_bytes == 0) {
+        std::cerr << "get_block_device_size failed" << std::endl;
+        return 1;
+    }
 
+    block_size = block_size * 16; //speed up reading blocks
     // Calculate the total number of blocks based on the block size and total size
     uint64_t total_blocks = total_bytes / block_size;
     std::cout << "Total number of blocks : " << total_blocks << std::endl;
