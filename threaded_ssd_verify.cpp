@@ -21,6 +21,7 @@
 
 std::mutex mtx; // Mutex for synchronized output
 
+#if 0
 void readBlock(const std::string& ssd_device, uint64_t block_number, int block_size,
                std::ofstream& success_log, std::ofstream& failed_log) {
     char * buffer = new char [block_size];
@@ -44,6 +45,45 @@ void readBlock(const std::string& ssd_device, uint64_t block_number, int block_s
     ssd_input.close();
 }
 
+#endif
+
+void readBlock(const std::string& ssd_device, uint64_t block_number, int block_size,
+               std::ofstream& success_log, std::ofstream& failed_log) {
+    int fd = open(ssd_device.c_str(), O_RDONLY | O_DIRECT);
+    if (fd == -1) {
+        std::cerr << "Error opening SSD device" << std::endl;
+        return;
+    }
+    char * buffer;
+    posix_memalign((void**)&buffer, block_size, block_size);
+    // Seek to the desired block offset
+    off_t offset = block_number * block_size;
+    if (lseek(fd, offset, SEEK_SET) == -1) {
+        std::cerr << "Error seeking to block offset" << std::endl;
+        free(buffer);
+        close(fd);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mtx);
+    ssize_t bytes_read = read(fd, buffer, block_size);
+    if (bytes_read == -1) {
+        std::cerr << "Error reading block: " << block_number << std::endl;
+        failed_log << "Error reading block: " << block_number << std::endl;
+    } else if (bytes_read != block_size) {
+        std::cerr << "Incomplete block read: " << block_number << std::endl;
+        failed_log << "Incomplete block read: " << block_number << std::endl;
+    } else {
+	success_log << "Block " << block_number << ": Read successful" << std::endl;
+    }
+
+    // Free the buffer and close the file descriptor
+    free(buffer);
+    close(fd);
+    return;
+
+}
+
 long long get_block_device_size(const char* device_path, long long* total_bytes,
         unsigned long* block_size) {
 
@@ -59,6 +99,7 @@ long long get_block_device_size(const char* device_path, long long* total_bytes,
     }
     if (ioctl(fd, BLKSSZGET, block_size) < 0) {
         std::cerr << "Device " << device_path << "BLKSSZGET ioctl failed" << std::endl;
+        close(fd);
         return 1;
     }
 
@@ -80,7 +121,7 @@ int main() {
         return 1;
     }
 
-    block_size = block_size * 16; //speed up reading blocks
+    //block_size = block_size * 16; // Read multiple blocks to speed up.
     // Calculate the total number of blocks based on the block size and total size
     uint64_t total_blocks = total_bytes / block_size;
     std::cout << "Total number of blocks : " << total_blocks << std::endl;
